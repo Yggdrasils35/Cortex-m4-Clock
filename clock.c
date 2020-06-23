@@ -1,0 +1,395 @@
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "hw_memmap.h"
+#include "debug.h"
+#include "gpio.h"
+#include "hw_i2c.h"
+#include "hw_types.h"
+#include "i2c.h"
+#include "pin_map.h"
+#include "sysctl.h"
+#include "systick.h"
+//*****************************************************************************
+//
+//I2C GPIO chip address and resigster define
+//
+//*****************************************************************************
+#define TCA6424_I2CADDR 					0x22
+#define PCA9557_I2CADDR						0x18
+
+#define PCA9557_INPUT						0x00
+#define	PCA9557_OUTPUT						0x01
+#define PCA9557_POLINVERT					0x02
+#define PCA9557_CONFIG						0x03
+
+#define TCA6424_CONFIG_PORT0			0x0c
+#define TCA6424_CONFIG_PORT1			0x0d
+#define TCA6424_CONFIG_PORT2			0x0e
+
+#define TCA6424_INPUT_PORT0				0x00
+#define TCA6424_INPUT_PORT1				0x01
+#define TCA6424_INPUT_PORT2				0x02
+
+#define TCA6424_OUTPUT_PORT0			0x04
+#define TCA6424_OUTPUT_PORT1			0x05
+#define TCA6424_OUTPUT_PORT2			0x06
+
+
+void 	SysTick_Init(void);
+void 	SysTick_Handler(void);
+void 	PortJ_IntHandler(void);
+
+void 	Delay(uint32_t value);
+void 	S800_GPIO_Init(void);
+void 	S800_I2C0_Init(void);
+void 	Time_Init(void);
+// 显示函数
+void 	Display_Time(void);
+void 	display_led(void);
+void 	Display_Day(void);
+
+// 设置函数
+void Clock1_Set(void);
+void Clock2_Set(void);
+uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData);
+uint8_t I2C0_ReadByte(uint8_t DevAddr, uint8_t RegAddr);
+
+volatile uint8_t result;
+uint32_t ui32SysClock,Tick=0;
+
+uint16_t clk = 0;
+uint8_t seg7[] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f,0x77,0x7c,0x58,0x5e,0x079,0x71,0x5c};
+
+uint8_t reverse_bit(uint8_t value);
+uint8_t mode = 1;
+uint8_t led[9] = {0xFF,0x7F,0x3F,0x1F,0x0F,0x07,0x03,0x01,0x00};
+
+// 时间结构定义
+struct Time
+{
+	int hour;
+	int min;
+	int sec;
+	int psec;
+	bool isAfter;
+};
+
+struct Time clock;
+struct Time clock1;
+struct Time clock2;
+
+struct Days
+{
+	int year;
+	int month;
+	int day;
+}date;
+
+int main(void)
+{
+	//use internal 16M oscillator, HSI
+	ui32SysClock = SysCtlClockFreqSet((SYSCTL_XTAL_16MHZ |SYSCTL_OSC_INT |SYSCTL_USE_OSC), 16000000);		
+	SysTick_Init();
+	S800_GPIO_Init();
+	S800_I2C0_Init();
+	Time_Init();
+	clock.hour = 13;
+	while (1)
+	{
+		// mode = GPIOPinRead(TCA6424_INPUT_PORT0, GPIO_PIN_0);
+		Display_Time();
+		display_led();	
+		
+	}
+}
+
+void Delay(uint32_t value)
+{
+	uint32_t ui32Loop;
+	for(ui32Loop = 0; ui32Loop < value; ui32Loop++){};
+}
+
+void S800_GPIO_Init(void)
+{
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);						//Enable PortF
+	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));			//Wait for the GPIO moduleF ready
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);						//Enable PortJ	
+	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOJ));			//Wait for the GPIO moduleJ ready	
+	SysCtlPeripheralEnable(TCA6424_INPUT_PORT0);
+	
+	GPIOIntRegister(TCA6424_INPUT_PORT0, PortJ_IntHandler);
+	GPIOIntRegister(GPIO_PORTJ_BASE, PortJ_IntHandler); 
+	
+	GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_0);			//Set PF0 as Output pin
+	GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE,GPIO_PIN_0 | GPIO_PIN_1);//Set the PJ0,PJ1 as input pin
+	GPIOPadConfigSet(GPIO_PORTJ_BASE,GPIO_PIN_0 | GPIO_PIN_1,GPIO_STRENGTH_2MA,GPIO_PIN_TYPE_STD_WPU);
+	GPIOIntTypeSet(GPIO_PORTJ_BASE, GPIO_PIN_0, GPIO_FALLING_EDGE);
+	GPIOIntEnable(GPIO_PORTJ_BASE, GPIO_PIN_0);
+	
+}
+
+
+void S800_I2C0_Init(void)
+{
+	uint8_t result;
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C0);
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+	GPIOPinConfigure(GPIO_PB2_I2C0SCL);
+	GPIOPinConfigure(GPIO_PB3_I2C0SDA);
+	GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);
+	GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);
+
+	I2CMasterInitExpClk(I2C0_BASE,ui32SysClock, true);										//config I2C0 400k
+	I2CMasterEnable(I2C0_BASE);	
+
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_CONFIG_PORT0,0x0ff);		//config port 0 as input
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_CONFIG_PORT1,0x0);			//config port 1 as output
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_CONFIG_PORT2,0x0);			//config port 2 as output 
+
+	result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_CONFIG,0x00);					//config port as output
+	result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,0x0ff);				//turn off the LED1-8
+	
+}
+
+void Time_Init(void)
+{
+	date.year = 2020;
+	date.month = 6;
+	date.day = 22;
+}
+
+
+uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData)
+{
+	uint8_t rop;
+	while(I2CMasterBusy(I2C0_BASE)){};
+		//
+	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, false);
+		
+	I2CMasterDataPut(I2C0_BASE, RegAddr);
+	I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+	while(I2CMasterBusy(I2C0_BASE)){};
+		
+	rop = (uint8_t)I2CMasterErr(I2C0_BASE);
+
+	I2CMasterDataPut(I2C0_BASE, WriteData);
+	I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_FINISH);
+	while(I2CMasterBusy(I2C0_BASE)){};
+
+	rop = (uint8_t)I2CMasterErr(I2C0_BASE);
+
+	return rop;
+}
+
+uint8_t I2C0_ReadByte(uint8_t DevAddr, uint8_t RegAddr)
+{
+	uint8_t value,rop;
+	while(I2CMasterBusy(I2C0_BASE)){};	
+	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, false);
+	I2CMasterDataPut(I2C0_BASE, RegAddr);
+//	I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);		
+	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_SEND);
+	while(I2CMasterBusBusy(I2C0_BASE));
+	rop = (uint8_t)I2CMasterErr(I2C0_BASE);
+	Delay(1);
+	//receive data
+	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, true);
+	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_RECEIVE);
+	while(I2CMasterBusBusy(I2C0_BASE));
+	value=I2CMasterDataGet(I2C0_BASE);
+	Delay(1);
+	return value;
+}
+
+void PortJ_IntHandler(void)
+{
+	uint32_t ulStatus;
+	ulStatus=GPIOIntStatus(GPIO_PORTJ_BASE,true);
+	
+	GPIOIntClear(GPIO_PORTJ_BASE,ulStatus);
+	if (ulStatus & GPIO_PIN_0) {
+		mode = (mode + 1) % 2;
+	}
+	
+}
+
+// initialize the systick timer
+void  SysTick_Init(void)
+{
+	SysTickEnable();
+	SysTickPeriodSet(ui32SysClock/100);
+	SysTickIntEnable();
+}
+
+
+// the interrupt serverce subrotine of systick
+
+void SysTick_Handler(void)
+{
+	clock.psec++;
+	clk++;
+	if (clock.hour >= 12) clock.isAfter = 1; {
+		if (mode) clock.hour = clock.hour % 12;
+	}
+	if (clock.isAfter == 1 && mode == 0 && clock.hour < 12) {
+		clock.hour = clock.hour + 12;
+	}
+	if (clock.psec >= 100) {
+		clock.psec = 0;
+		clock.sec++;
+		if (clock.sec >= 60) {
+			clock.sec = 0;
+			clock.min++;
+			if (clock.min >= 60) {
+				clock.hour++;
+				clock.min = 0;
+			}
+		}
+	}
+}
+
+void Display_Time()
+{
+	uint8_t idx[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
+	// display the percent seconds
+	int x = clock.psec % 10;
+	int y = clock.psec / 10;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[0]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[1]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+
+	// display the seconds
+	x = clock.sec % 10;
+	y = clock.sec / 10;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[2]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[3]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	// display the minutes
+	x = clock.min % 10;
+	y = clock.min / 10;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[4]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[5]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	// display the hours
+	x = clock.hour % 10;
+	y = clock.hour / 10;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[6]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[7]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+}
+
+void Display_Day(void)
+{
+	uint8_t idx[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
+	// display the percent seconds
+	int x = date.day % 10;
+	int y = date.day / 10;
+	int pyear, z, m;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[0]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[1]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+
+	// display the seconds
+	x = date.month % 10;
+	y = date.month / 10;
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[2]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[3]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	// display the minutes
+	pyear = date.year;
+	x = pyear % 10;
+	pyear /= 10;
+	y = pyear % 10;
+	pyear /= 10;
+	z = pyear % 10;
+	m = pyear / 10;
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[4]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[5]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[z]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[6]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[m]+0x80);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[7]));
+	Delay(10000);
+	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+}
+
+void Clock1_Set(void)
+{
+	clock1.min = clock.min;
+	clock1.hour = clock1.hour;
+	
+}
+
+void display_led(void)
+{
+	uint16_t idx = clk / 100;
+	if (idx <= 8) result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,led[idx]);
+	else {
+		result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,~led[idx-8]);	
+	}
+	if (idx >= 16) clk = 0;
+}
+
+uint8_t reverse_bit(uint8_t value)
+{
+    uint8_t num = 0;
+    int i = 0;
+    for(i=7;i>=0;i--)
+    {
+			num |= (( value % 2 ) << i );
+			value >>= 1;
+    }
+    return num;
+}
