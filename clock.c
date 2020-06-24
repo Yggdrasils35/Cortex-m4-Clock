@@ -35,6 +35,7 @@
 #define TCA6424_OUTPUT_PORT1			0x05
 #define TCA6424_OUTPUT_PORT2			0x06
 
+#define FASTDELAY 600000
 
 void 	SysTick_Init(void);
 void 	SysTick_Handler(void);
@@ -48,10 +49,15 @@ void 	Time_Init(void);
 void 	Display_Time(void);
 void 	display_led(void);
 void 	Display_Day(void);
+void 	Display_clock(uint8_t pclock);
 
 // 设置函数
+uint8_t changeMode(void);
 void Clock1_Set(void);
 void Clock2_Set(void);
+void Test_Clock1(void);
+void Test_Clock2(void);
+
 uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData);
 uint8_t I2C0_ReadByte(uint8_t DevAddr, uint8_t RegAddr);
 
@@ -59,11 +65,14 @@ volatile uint8_t result;
 uint32_t ui32SysClock,Tick=0;
 
 uint16_t clk = 0;
-uint8_t seg7[] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f,0x77,0x7c,0x58,0x5e,0x079,0x71,0x5c};
+uint8_t seg7[] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f,0x77,0x7c,0x58,0x5e,0x079,0x71,0x5c};	// 数字（包含小数点）
 
 uint8_t reverse_bit(uint8_t value);
-uint8_t mode = 1;
-uint8_t led[9] = {0xFF,0x7F,0x3F,0x1F,0x0F,0x07,0x03,0x01,0x00};
+uint8_t tmode = 1;	// 12/24小时表示，1为24，0为12
+uint8_t mode = 0; 	// 按键状态
+
+uint8_t idx[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};	// 数码管位数
+uint8_t led[9] = {0xFF,0x7F,0x3F,0x1F,0x0F,0x07,0x03,0x01,0x00};	// led灯
 
 // 时间结构定义
 struct Time
@@ -97,8 +106,14 @@ int main(void)
 	clock.hour = 13;
 	while (1)
 	{
-		// mode = GPIOPinRead(TCA6424_INPUT_PORT0, GPIO_PIN_0);
-		Display_Time();
+		mode = changeMode();
+		
+		switch (mode) {
+			case 0: Display_Time();break;
+			case 1: Display_Day();break;
+			case 2: Clock1_Set();break;
+			default: Display_Time();
+		}
 		display_led();	
 		
 	}
@@ -116,10 +131,10 @@ void S800_GPIO_Init(void)
 	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));			//Wait for the GPIO moduleF ready
 	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);						//Enable PortJ	
 	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOJ));			//Wait for the GPIO moduleJ ready	
-	SysCtlPeripheralEnable(TCA6424_INPUT_PORT0);
 	
-	GPIOIntRegister(TCA6424_INPUT_PORT0, PortJ_IntHandler);
+	
 	GPIOIntRegister(GPIO_PORTJ_BASE, PortJ_IntHandler); 
+	//GPIOPinTypeGPIOInput(TCA6424_INPUT_PORT0, GPIO_PIN_0);
 	
 	GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_0);			//Set PF0 as Output pin
 	GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE,GPIO_PIN_0 | GPIO_PIN_1);//Set the PJ0,PJ1 as input pin
@@ -133,12 +148,12 @@ void S800_GPIO_Init(void)
 void S800_I2C0_Init(void)
 {
 	uint8_t result;
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C0);
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
-	GPIOPinConfigure(GPIO_PB2_I2C0SCL);
-	GPIOPinConfigure(GPIO_PB3_I2C0SDA);
-	GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);
-	GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C0);//Եʼۯi2cģࠩ
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);//ʹԃI2Cģࠩ0ìӽޅƤ׃ΪI2C0SCL--PB2bI2C0SDA--PB3
+	GPIOPinConfigure(GPIO_PB2_I2C0SCL);//Ƥ׃PB2ΪI2C0SCL
+	GPIOPinConfigure(GPIO_PB3_I2C0SDA);//Ƥ׃PB3ΪI2C0SDA
+	GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);//I2CݫGPIO_PIN_2ԃطSCL
+	GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);//I2CݫGPIO_PIN_3ԃطSDA
 
 	I2CMasterInitExpClk(I2C0_BASE,ui32SysClock, true);										//config I2C0 400k
 	I2CMasterEnable(I2C0_BASE);	
@@ -185,20 +200,20 @@ uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData)
 uint8_t I2C0_ReadByte(uint8_t DevAddr, uint8_t RegAddr)
 {
 	uint8_t value,rop;
-	while(I2CMasterBusy(I2C0_BASE)){};	
+	while(I2CMasterBusy(I2C0_BASE)){};
 	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, false);
 	I2CMasterDataPut(I2C0_BASE, RegAddr);
-//	I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);		
-	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_SEND);
+	// I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_SEND);//Ö´ÐÐµ¥´ÊÐ´Èë²Ù×÷
 	while(I2CMasterBusBusy(I2C0_BASE));
 	rop = (uint8_t)I2CMasterErr(I2C0_BASE);
-	Delay(1);
+	Delay(100);
 	//receive data
-	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, true);
-	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_RECEIVE);
+	I2CMasterSlaveAddrSet(I2C0_BASE, DevAddr, true);//ÉèÖÃ´Ó»úµØÖ·
+	I2CMasterControl(I2C0_BASE,I2C_MASTER_CMD_SINGLE_RECEIVE);//Ö´ÐÐµ¥´Î¶Á²Ù×÷
 	while(I2CMasterBusBusy(I2C0_BASE));
-	value=I2CMasterDataGet(I2C0_BASE);
-	Delay(1);
+	value=I2CMasterDataGet(I2C0_BASE);//»ñÈ¡¶ÁÈ¡µÄÊý¾Ý
+	Delay(100);
 	return value;
 }
 
@@ -208,11 +223,24 @@ void PortJ_IntHandler(void)
 	ulStatus=GPIOIntStatus(GPIO_PORTJ_BASE,true);
 	
 	GPIOIntClear(GPIO_PORTJ_BASE,ulStatus);
-	if (ulStatus & GPIO_PIN_0) {
-		mode = (mode + 1) % 2;
-	}
 	
 }
+
+
+uint8_t changeMode(void)
+{
+	uint8_t tmp, pmode1;	// pmode1检测sw1
+	tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+	pmode1 = tmp & 0x01;
+	if (pmode1) {
+		Delay(FASTDELAY);
+		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+		pmode1 = tmp & 0x01;
+		if (pmode1) mode = (mode + 1) % 3;
+	}
+	return mode;
+}
+
 
 // initialize the systick timer
 void  SysTick_Init(void)
@@ -224,15 +252,14 @@ void  SysTick_Init(void)
 
 
 // the interrupt serverce subrotine of systick
-
 void SysTick_Handler(void)
 {
 	clock.psec++;
 	clk++;
 	if (clock.hour >= 12) clock.isAfter = 1; {
-		if (mode) clock.hour = clock.hour % 12;
+		if (tmode) clock.hour = clock.hour % 12;
 	}
-	if (clock.isAfter == 1 && mode == 0 && clock.hour < 12) {
+	if (clock.isAfter == 1 && tmode == 0 && clock.hour < 12) {
 		clock.hour = clock.hour + 12;
 	}
 	if (clock.psec >= 100) {
@@ -251,7 +278,6 @@ void SysTick_Handler(void)
 
 void Display_Time()
 {
-	uint8_t idx[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
 	// display the percent seconds
 	int x = clock.psec % 10;
 	int y = clock.psec / 10;
@@ -365,13 +391,159 @@ void Display_Day(void)
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
 }
 
+
+void Display_clock(uint8_t pclock)
+{
+	int x,y;
+	if (pclock == 1) {
+		// 闪烁显示clock1
+		// To be continued
+		x = clock1.min % 10;
+		y = clock1.min / 10;
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[4]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[5]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		// display the hours
+		x = clock1.hour % 10;
+		y = clock1.hour / 10;
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[6]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[7]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	}
+	else {
+		// 闪烁显示clock2
+		// To be continued
+		x = clock2.min % 10;
+		y = clock2.min / 10;
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[4]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[5]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		// display the hours
+		x = clock2.hour % 10;
+		y = clock2.hour / 10;
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[6]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[y]);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[7]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+	}
+}
+
 void Clock1_Set(void)
 {
+	uint8_t tmp, pmode2, pmode3, pmode6;
+	clock1.min = clock.min;
+	clock1.hour = clock.hour;
+	
+	while (true) {
+		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+		pmode2 = tmp & 0x02;
+		pmode3 = tmp & 0x04;
+		pmode6 = tmp & 0x20;
+		if (pmode2) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode2 = tmp & 0x02;
+			if (pmode2) clock1.min = (clock1.min + 1) % 60;
+		}
+		
+		if (pmode3) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode3 = tmp & 0x04;
+			if (pmode3) clock1.hour = (clock1.hour + 1) % 24;
+		}
+		
+		if (pmode6) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode6 = tmp & 0x20;
+			if (pmode6) {
+				mode = 0;
+				break;
+			}
+		}
+		Display_clock(1);
+	}
+}
+
+void Clock2_Set(void)
+{
+	uint8_t tmp, pmode2, pmode3, pmode7;
 	clock1.min = clock.min;
 	clock1.hour = clock1.hour;
 	
+	while (true) {
+		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+		pmode2 = tmp & 0x02;
+		pmode3 = tmp & 0x04;
+		pmode7 = tmp & 0x40;
+		if (pmode2) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode2 = tmp & 0x02;
+			if (pmode2) clock2.min = (clock2.min + 1) % 60;
+		}
+		
+		if (pmode3) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode3 = tmp & 0x04;
+			if (pmode2) clock2.min = (clock2.hour + 1) % 24;
+		}
+		
+		if (pmode7) {
+			Delay(FASTDELAY);
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			pmode7 = tmp & 0x20;
+			if (pmode7) break;
+		}
+	}
 }
 
+
+void Test_Clock1(void)
+{
+	if (clock.hour == clock1.hour && clock.min == clock1.min) {
+		// 蜂鸣器响，led1闪烁
+		// To be continued
+		uint8_t tmp;
+		while(true) {
+			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+			if (clock.sec % 2 == 0)	result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[1]);
+			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+			if (tmp != 0) {
+				Delay(FASTDELAY);
+				tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+				if (tmp != 0) break;
+			}
+		}
+	}
+}
 void display_led(void)
 {
 	uint16_t idx = clk / 100;
