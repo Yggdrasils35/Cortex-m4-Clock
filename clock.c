@@ -307,13 +307,21 @@ void SysTick_Handler(void)
 	
 	if (clock.psec >= 100) {
 		clock.psec = 0;
-		clock.sec++;
+		clock.sec++;	// 秒数增加
 		if (clock.sec >= 60) {
-			clock.sec = 0;
-			clock.min++;
+            		clock.sec = 0;
+            		clock.min++;	// 分钟增加
 			if (clock.min >= 60) {
-				clock.hour = (clock.hour + 1) % 24;
 				clock.min = 0;
+				clock.hour++;	// 小时增加
+				if (clock.hour == 24) {
+					clock.hour = 0;
+					date.day++;		// 天数增加
+					if (date.day == monthD[date.month]) {
+						date.day = 1;
+						date.month = (date.month + 1) % 13;		// 月份增加
+					}
+				}
 			}
 		}
 	}
