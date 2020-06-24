@@ -39,7 +39,7 @@
 #define TCA6424_OUTPUT_PORT1			0x05
 #define TCA6424_OUTPUT_PORT2			0x06
 
-#define FASTDELAY 600000
+#define FASTDELAY 1000000
 
 void 	SysTick_Init(void);
 void 	SysTick_Handler(void);
@@ -92,11 +92,12 @@ uint8_t leds[9] = {0xFF,0x7F,0x3F,0x1F,0x0F,0x07,0x03,0x01,0x00};	// 多个led�
 // 时间结构定义
 struct Time
 {
-	int hour;
+	int hour;	// 24hours
+	int phour;	// 12hours
 	int min;
 	int sec;
 	int psec;
-	bool isAfter;
+	bool isPM;
 };
 
 struct Time clock;
@@ -279,7 +280,7 @@ uint8_t changeMode(void)
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 		pmode1 = tmp & 0x01;
 		if (pmode1) {
-			mode = (mode + 1) % 6;
+			mode = (mode + 1) % 3;
 		}
 	}
 	return mode;
@@ -300,12 +301,10 @@ void SysTick_Handler(void)
 {
 	clock.psec++;
 	clk++;
-	if (clock.hour >= 12) clock.isAfter = 1; {
-		if (tmode) clock.hour = clock.hour % 12;
-	}
-	if (clock.isAfter == 1 && tmode == 0 && clock.hour < 12) {
-		clock.hour = clock.hour + 12;
-	}
+	if (clock.hour >= 12) clock.isPM = 1; 
+	
+	if (tmode) clock.phour = clock.hour % 12;
+	
 	if (clock.psec >= 100) {
 		clock.psec = 0;
 		clock.sec++;
@@ -313,7 +312,7 @@ void SysTick_Handler(void)
 			clock.sec = 0;
 			clock.min++;
 			if (clock.min >= 60) {
-				clock.hour++;
+				clock.hour = (clock.hour + 1) % 24;
 				clock.min = 0;
 			}
 		}
@@ -325,6 +324,23 @@ void Display_Time()		// mode = 0
 	// display the percent seconds
 	int x = clock.psec % 10;
 	int y = clock.psec / 10;
+	if (isClock1 && isClock2) {
+		if (clock.psec / 50 == 0 && clock.sec % 2 == 0) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, 0xFC);
+		else {
+			if (clock.psec / 50 == 0 && clock.sec % 2 == 1) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[1]);
+			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+		}
+	}
+	else {
+		if (isClock1) {
+			if (clock.psec / 50 == 0) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[1]);
+			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+		}
+		if (isClock2) {
+			if (clock.sec % 2 == 0) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[2]);
+			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+		}
+	}
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]);
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[0]));
 	Delay(10000);
@@ -502,6 +518,9 @@ void Display_TimeSet(void)
 {
 	int x, y;
 	
+	if (clock.psec / 50 == 0) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[3]);
+	else  result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+	
 	x = clock.min % 10;
 	y = clock.min / 10;
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
@@ -533,6 +552,10 @@ void Display_DateSet(void)
 {
 	int x = date.day % 10;
 	int y = date.day / 10;
+	
+	if (clock.psec / 50 == 0) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[4]);
+	else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+	
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]);
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[4]));
 	Delay(10000);
@@ -583,9 +606,10 @@ void Clock1_Set(void)	// mode = 2
 	}
 	
 	tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
-	
-	clock1.min = clock.min;
-	clock1.hour = clock.hour;
+	if (!isClock1) {
+		clock1.min = clock.min;
+		clock1.hour = clock.hour;
+	}
 	while (true) {
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 		if (tmp & 0x26) {
@@ -631,10 +655,10 @@ void Clock2_Set(void)	// mode = 3
 	}
 	
 	tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
-	
-	clock2.min = clock.min;
-	clock2.hour = clock.hour;
-	
+	if (!isClock2) {
+		clock2.min = clock.min;
+		clock2.hour = clock.hour;
+	}
 	while (true) {
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 		if (tmp & 0x46) {
@@ -657,7 +681,6 @@ void Time_Set(void)		// mode = 4
 {
 	uint8_t tmp;
 	
-	result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[3]);
 	while (true) {
 		
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
@@ -673,6 +696,7 @@ void Time_Set(void)		// mode = 4
 		}
 		Display_TimeSet();
 	}
+	result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 }
 
 
@@ -680,9 +704,7 @@ void Date_Set(void)		// mode = 5
 {
 	uint8_t tmp;
 	
-	result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[3]);
 	while (true) {
-		
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 		if (tmp & 0x19) {
 			Delay(FASTDELAY);
@@ -692,11 +714,14 @@ void Date_Set(void)		// mode = 5
 			if (tmp & 0x01) {
 				mode = -1;
 				break;
-			}
+				}
 		}
 		Display_DateSet();
 	}
+	result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 }
+
+
 void Test_Clock1(void)
 {
 	if (isClock1 && clock.hour == clock1.hour && clock.min == clock1.min) {
@@ -719,8 +744,8 @@ void Test_Clock1(void)
 				Delay(FASTDELAY);
 				tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 				if (tmp != 0) {
-				    isClock1 = 0;
-				    break;
+					isClock1 = 0;
+					break;
 				}
 			}
 		}
@@ -736,20 +761,20 @@ void Test_Clock2(void)
 		while(true) {
 			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 			if (clock.sec % 2 == 0)	{
-			    result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[2]);
-			    Display_clock(2);
+				result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[2]);
+				Display_clock(2);
 			}
 			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 			if (clock.sec - beginTime > 10) {	// 最多持续10s
-			    isClock2 = 0;
-			    break;
+				isClock2 = 0;
+				break;
 			}
 			if (tmp != 0) {		// 任意按键结束闹钟
 				Delay(FASTDELAY);
 				tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 				if (tmp != 0) {
-				    isClock2 = 0;
-				    break;
+					isClock2 = 0;
+					break;
 				}
 			}
 		}
@@ -762,7 +787,7 @@ void Display_led(void)
 	uint16_t idx = clk / 100;
 	if (idx <= 8) result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,led[idx]);
 	else {
-	    result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,~led[idx-8]);	
+		result = I2C0_WriteByte(PCA9557_I2CADDR,PCA9557_OUTPUT,~led[idx-8]);	
 	}
 	if (idx >= 16) clk = 0;
 }
@@ -773,8 +798,8 @@ uint8_t reverse_bit(uint8_t value)
     int i = 0;
     for(i=7;i>=0;i--)
     {
-	num |= (( value % 2 ) << i );
-	value >>= 1;
+			num |= (( value % 2 ) << i );
+			value >>= 1;
     }
     return num;
 }
