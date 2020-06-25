@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "hw_memmap.h"
+#include "hw_ints.h"
 #include "debug.h"
 #include "gpio.h"
 #include "hw_i2c.h"
@@ -13,6 +14,8 @@
 #include "timer.h"
 #include "interrupt.h"
 #include "uart.h"
+#include "adc.h"
+#include "utils/uartstdio.h"
 
 //*****************************************************************************
 //
@@ -40,24 +43,30 @@
 #define TCA6424_OUTPUT_PORT2			0x06
 
 #define FASTDELAY 1000000
-
+#define TARGET_IS_TM4C129_RA0 
+#define SYSCTL_CFG_VCO_240      0xF1000000
 void 	SysTick_Init(void);
 void 	SysTick_Handler(void);
 void 	PortJ_IntHandler(void);
 
 void 	Delay(uint32_t value);
+// 初始化函数
 void 	S800_GPIO_Init(void);
 void 	S800_I2C0_Init(void);
 void 	Time_Init(void);
 void 	Timer_Init(void);	// Timer初始化
+void 	Timer_Disable(void);// Timer失能
+void 	ADC_Init(void);		// ADC初始化
 
 // 显示函数
 void 	Display_Time(void);		// mode = 0
 void 	Display_led(void);
 void 	Display_Day(void);		// mode = 1;
+void 	Display_ADC(void);
 void 	Display_clock(uint8_t pclock);
 void 	Display_TimeSet(void);	// 时间设置时的显示函数
 void 	Display_DateSet(void);	// 日期设置时的显示函数
+void 	Display(uint32_t num, int isFlag);	// 用于ADC显示
 
 // 设置函数
 uint8_t changeMode(void);
@@ -85,9 +94,48 @@ uint8_t mode = 0; 	// 按键状态
 uint8_t isClock1 = 0;
 uint8_t isClock2 = 0;
 
+// ADC
+float  t;
+uint32_t pui32ADC0Temp[1];
+uint32_t pui32ADC0Volt[1];
+uint32_t ui32VoltValue;
+uint32_t ui32TempValueC;
+uint32_t ui32TempValueF;
+
+// 蜂鸣器
 uint8_t idx[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};	// 数码管位数
 uint8_t led[9] = {0xFF, 0xFE, 0xFD, 0xFB, 0xF7, 0xEF, 0XDF, 0xBF, 0x7F};	// 单个led灯
 uint8_t leds[9] = {0xFF,0x7F,0x3F,0x1F,0x0F,0x07,0x03,0x01,0x00};	// 多个led灯编码
+int monthD[12] = {31,28,31,30,31,30,31,31,30,31,30,31};		// 月份对应天数
+
+uint16_t tone[] = {247,262,294,330,349,392,440,494,523,587,659,698,784,1000};
+uint16_t music[] = {5,5,6,8,7,6,5,6,13,13,//音调
+	5,5,6,8,7,6,5,3,13,13,
+	2,2,3,5,3,5,6,3,2,1,
+	6,6,5,6,5,3,6,5,13,13,
+	5,5,6,8,7,6,5,6,13,13,
+	5,5,6,8,7,6,5,3,13,13,
+	2,2,3,5,3,5,6,3,2,1,
+	6,6,5,6,5,3,6,1,
+	13,8,9,10,10,9,8,10,9,8,6,
+	13,6,8,9,9,8,6,9,8,6,5,
+	13,2,3,5,5,3,5,5,6,8,7,6,
+	6,10,9,9,8,6,5,6,8
+};
+uint16_t time[] = {2,4,2,2,2,2,2,8,4, 4, //时间
+	2,4,2,2,2,2,2,8,4, 4,
+	2,4,2,4,2,2,4,2,2,8,
+	2,4,2,2,2,2,2,8,4 ,4,
+	2,4,2,2,2,2,2,8,4, 4,
+	2,4,2,2,2,2,2,8,4, 4,
+	2,4,2,4,2,2,4,2,2,8,
+	2,4,2,2,2,2,2,8,
+	4, 2,2,2, 4, 2,2,2, 2,2,8,
+	4, 2,2,2,4,2,2,2,2,2,8,
+	4, 2,2,2,4,2,2,5,2,6,2,4,
+	2,2 ,2,4,2,4,2,2,12
+};
+uint16_t m = 0, n = 0;	// 蜂鸣器用寄存器
 
 // 时间结构定义
 struct Time
@@ -114,24 +162,48 @@ struct Days
 void Timer0IntHandler(void)
 {
 	TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
-	
+	m = !m;
+	TimerLoadSet(TIMER1_BASE, TIMER_A, ui32SysClock / tone[music[n]]);
 }
 
 void Timer1IntHandler(void)
 {
-	
+	TimerIntClear(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+	if (music[n]!=13) {
+		if (m) GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		else GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+	}
+	n = (n + 1) % 75;
+	TimerLoadSet(TIMER1_BASE, TIMER_A, ui32SysClock / time[n]);
 }
 
 int main(void)
 {
 	//use internal 16M oscillator, HSI
-	ui32SysClock = SysCtlClockFreqSet((SYSCTL_XTAL_16MHZ |SYSCTL_OSC_INT |SYSCTL_USE_OSC), 16000000);	// Systick时钟
-	
+	// ui32SysClock = SysCtlClockFreqSet((SYSCTL_XTAL_16MHZ |SYSCTL_OSC_INT |SYSCTL_USE_OSC), 16000000);	// Systick时钟
+	#if defined(TARGET_IS_TM4C129_RA0) ||                                         \
+    defined(TARGET_IS_TM4C129_RA1) ||                                         \
+    defined(TARGET_IS_TM4C129_RA2)
+    //
+    // Note: SYSCTL_CFG_VCO_240 is a new setting provided in TivaWare 2.2.x and
+    // later to better reflect the actual VCO speed due to SYSCTL#22.
+    //
+    ui32SysClock = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ |
+                                       SYSCTL_OSC_MAIN |
+                                       SYSCTL_USE_PLL |
+                                       SYSCTL_CFG_VCO_480), 20000000);
+	#else
+		SysCtlClockSet(SYSCTL_SYSDIV_10 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN |
+					   SYSCTL_XTAL_16MHZ);
+	#endif
 	SysTick_Init();
 	S800_GPIO_Init();
 	S800_I2C0_Init();
 	Time_Init();
+	// Timer_Init();
 	clock.hour = 13;
+	ADC_Init();
+	
 	while (1)
 	{
 		mode = changeMode();
@@ -146,7 +218,8 @@ int main(void)
 			default: Display_Time();
 		}
 		Test_Clock1();
-		Test_Clock2();	
+		Test_Clock2();
+		
 	}
 }
 
@@ -160,19 +233,19 @@ void S800_GPIO_Init(void)
 {
 	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);						//Enable PortF
 	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));			//Wait for the GPIO moduleF ready
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);						//Enable PortJ	
-	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOJ));			//Wait for the GPIO moduleJ ready	
 	
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);			// Enable PortJ
+	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOJ));
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOK);
+	while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOK));
 	
 	GPIOIntRegister(GPIO_PORTJ_BASE, PortJ_IntHandler); 
-	//GPIOPinTypeGPIOInput(TCA6424_INPUT_PORT0, GPIO_PIN_0);
-	
+	GPIOPinTypeGPIOOutput(GPIO_PORTK_BASE, GPIO_PIN_5);
 	GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_0);			//Set PF0 as Output pin
-	GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE,GPIO_PIN_0 | GPIO_PIN_1);//Set the PJ0,PJ1 as input pin
-	GPIOPadConfigSet(GPIO_PORTJ_BASE,GPIO_PIN_0 | GPIO_PIN_1,GPIO_STRENGTH_2MA,GPIO_PIN_TYPE_STD_WPU);
+	GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE,GPIO_PIN_0);			//Set the PJ0 as input pin
+	GPIOPadConfigSet(GPIO_PORTJ_BASE,GPIO_PIN_0,GPIO_STRENGTH_2MA,GPIO_PIN_TYPE_STD_WPU);
 	GPIOIntTypeSet(GPIO_PORTJ_BASE, GPIO_PIN_0, GPIO_FALLING_EDGE);
 	GPIOIntEnable(GPIO_PORTJ_BASE, GPIO_PIN_0);
-	
 }
 
 
@@ -205,17 +278,24 @@ void Time_Init(void)
 	date.day = 22;
 }
 
-void Timer_Init(void)
+
+void ADC_Init(void)
 {
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER1);
-	// Enable processor interrupts.
-	IntMasterEnable();
-	TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
-	TimerConfigure(TIMER1_BASE, TIMER_CFG_PERIODIC);
-	
-	TimerLoadSet(TIMER0_BASE, TIMER_A, g_ui32SysClock);
-	TimerLoadSet(TIMER1_BASE, TIMER_A, g_ui32SysClock / 2);
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+	GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_1);
+	ADCSequenceConfigure(ADC0_BASE, 1, ADC_TRIGGER_PROCESSOR, 0);
+	ADCSequenceConfigure(ADC0_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
+	// ADCSequenceStepConfigure(ADC0_BASE, 3, 0, ADC_CTL_TS | ADC_CTL_IE |
+							// ADC_CTL_END);
+	ADCSequenceStepConfigure(ADC0_BASE, 1, 0,  ADC_CTL_TS | ADC_CTL_IE |
+                             ADC_CTL_END);
+	ADCSequenceStepConfigure(ADC0_BASE, 3, 0,  ADC_CTL_CH2 | ADC_CTL_IE |
+                             ADC_CTL_END);
+	ADCSequenceEnable(ADC0_BASE, 3);
+	ADCIntClear(ADC0_BASE, 3);
+	ADCSequenceEnable(ADC0_BASE, 1);
+	ADCIntClear(ADC0_BASE, 1);
 }
 
 uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData)
@@ -265,6 +345,9 @@ void PortJ_IntHandler(void)
 	ulStatus=GPIOIntStatus(GPIO_PORTJ_BASE,true);
 	
 	GPIOIntClear(GPIO_PORTJ_BASE,ulStatus);
+	if (ulStatus & GPIO_PIN_0) {
+		tmode = !tmode;
+	}
 	
 }
 
@@ -272,9 +355,17 @@ void PortJ_IntHandler(void)
 uint8_t changeMode(void)
 {
 	uint8_t tmp, pmode1;	// pmode1检测sw1
-	
+	int tsec = 0;
 	tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 	pmode1 = tmp & 0x01;
+	if (tmp & 0x01 && tmp & 0x02) {
+		Delay(FASTDELAY);
+		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+		if (tmp & 0x01 && tmp & 0x02) {
+			Display_ADC();
+			return 0;
+		}
+	}
 	if (pmode1) {
 		Delay(FASTDELAY);
 		tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
@@ -303,17 +394,15 @@ void SysTick_Handler(void)
 	clk++;
 	if (clock.hour >= 12) clock.isPM = 1; 
 	
-	if (tmode) clock.phour = clock.hour % 12;
-	
 	if (clock.psec >= 100) {
 		clock.psec = 0;
 		clock.sec++;	// 秒数增加
 		if (clock.sec >= 60) {
-            		clock.sec = 0;
-            		clock.min++;	// 分钟增加
+            clock.sec = 0;
+            clock.min++;	// 分钟增加
 			if (clock.min >= 60) {
 				clock.min = 0;
-				clock.hour++;	// 小时增加
+                clock.hour++;		// 小时增加
 				if (clock.hour == 24) {
 					clock.hour = 0;
 					date.day++;		// 天数增加
@@ -325,6 +414,7 @@ void SysTick_Handler(void)
 			}
 		}
 	}
+	clock.phour = clock.hour % 12;
 }
 
 void Display_Time()		// mode = 0
@@ -386,8 +476,16 @@ void Display_Time()		// mode = 0
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
 	
 	// display the hours
-	x = clock.hour % 10;
-	y = clock.hour / 10;
+	if (!tmode) {
+		x = clock.phour % 10;
+		y = clock.phour / 10;
+		if (clock.isPM) result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[5]);
+	}
+	else {
+		x = clock.hour % 10;
+		y = clock.hour / 10;
+		result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
+	}
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[6]));
 	Delay(10000);
@@ -457,6 +555,41 @@ void Display_Day(void)	// mode = 1
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[7]));
 	Delay(10000);
 	result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+}
+
+
+void Display_ADC(void)
+{
+	// sequence1用作温度检测
+	int loop = 0;
+	ADCProcessorTrigger(ADC0_BASE, 1);
+	while(!ADCIntStatus(ADC0_BASE, 1, false))
+	{
+	}
+	ADCIntClear(ADC0_BASE, 1);
+	ADCSequenceDataGet(ADC0_BASE, 1, pui32ADC0Temp);
+	
+	// sequence3用做电压检测
+	ADCProcessorTrigger(ADC0_BASE, 3);
+	while(!ADCIntStatus(ADC0_BASE, 3, false))
+	{
+	}
+	ADCIntClear(ADC0_BASE, 3);
+	
+	ADCSequenceDataGet(ADC0_BASE, 3, pui32ADC0Volt);
+	
+	t = 1475-75*33* pui32ADC0Temp[0]/4096;
+	ui32TempValueC=(uint32_t)t * 10;		// 偏于输出四位有效数字
+	t = pui32ADC0Volt[0] / 4.096 * 3.3;		// 计算四位电压数值
+	ui32VoltValue = (uint32_t)t;
+	
+	for (loop = 0; loop < 30; ++loop) {
+		// 温度
+		Display(ui32TempValueC, 0);
+		
+		// 电压
+		Display(ui32VoltValue, 1);
+	}
 }
 
 
@@ -733,11 +866,15 @@ void Date_Set(void)		// mode = 5
 void Test_Clock1(void)
 {
 	if (isClock1 && clock.hour == clock1.hour && clock.min == clock1.min) {
-		// 蜂鸣器响，led1闪烁
+		// led1闪烁
 		uint8_t tmp;
 		int beginTime = clock.sec;
 		
+		// Timer_Init();
+		
 		while(true) {
+			GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, GPIO_PIN_5);
+			
 			tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 			if (clock.psec / 50 == 0)	{
 				result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[1]);
@@ -746,6 +883,8 @@ void Test_Clock1(void)
 			else result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 			if (clock.sec - beginTime > 10) {	// 最多持续10s
 				isClock1 = 0;
+				GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+				result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 				break;
 			}
 			if (tmp != 0) {		// 任意按键结束闹钟
@@ -753,6 +892,8 @@ void Test_Clock1(void)
 				tmp = ~I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
 				if (tmp != 0) {
 					isClock1 = 0;
+					GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+					result = I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, led[0]);
 					break;
 				}
 			}
@@ -763,7 +904,7 @@ void Test_Clock1(void)
 void Test_Clock2(void)
 {
 	if (isClock2 && clock.hour == clock2.hour && clock.min == clock2.min) {
-		// 蜂鸣器响，led2闪烁
+		// led2闪烁
 		uint8_t tmp;
 		int beginTime = clock.sec;
 		while(true) {
@@ -800,6 +941,39 @@ void Display_led(void)
 	if (idx >= 16) clk = 0;
 }
 
+void Display(uint32_t num, int isFlag)
+{
+	int i = 0;
+	int j = 0;
+	while(num >= 1) {
+		int x = num % 10;
+		if (i == 2+isFlag) {
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]+0x80);
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[i+isFlag*4]));
+		}
+		else {
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[x]);
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[i+isFlag*4]));
+		}
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		num /= 10;
+		i++;
+	}
+	// 当电压小于0时，表示小数
+	if (i < 4 && isFlag) {
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[0]+0x80);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[3+isFlag*4]));
+		Delay(10000);
+		result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		for (j = 2; j >= i; --j) {
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT1,seg7[0]);
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(idx[j+isFlag*4]));
+			Delay(10000);
+			result = I2C0_WriteByte(TCA6424_I2CADDR,TCA6424_OUTPUT_PORT2,(uint8_t)(0));
+		}
+	}		
+}
 uint8_t reverse_bit(uint8_t value)
 {
     uint8_t num = 0;
