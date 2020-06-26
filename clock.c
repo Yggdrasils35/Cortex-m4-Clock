@@ -1,6 +1,8 @@
-
+#include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "hw_memmap.h"
 #include "hw_ints.h"
 #include "debug.h"
@@ -86,7 +88,19 @@ void Test_Clock2(void);
 
 // UART收发函数
 void UARTStringPut(const unsigned char *msg);
-void StringToMode(void);
+void StringToMode(void);	// 根据输入字符串得到相应功能的状态数
+void ModeToFunc(void);	// 根据状态数调用相应函数
+void GetDate(void);
+void GetTime(void);
+void UART_Time_Set(void);
+void UART_Date_Set(void);
+void UART_Clock1_Set(void);
+void UART_Clock2_Set(void);
+void GetVolt(void);
+void GetTemp(void);
+void Get_T_V(void);
+void PWM_Set(void);
+
 
 // I2C读写函数
 uint8_t I2C0_WriteByte(uint8_t DevAddr, uint8_t RegAddr, uint8_t WriteData);
@@ -112,6 +126,7 @@ uint32_t ui32TempValueF;
 // UART
 unsigned char RxBuf[30];
 unsigned char TxBuf[30];
+unsigned char WrongMsg[30] = "You Message Error!";
 int RxEndFlag = 0;
 unsigned char message[] = "True";
 
@@ -216,8 +231,6 @@ int main(void)
 	S800_I2C0_Init();
 	S800_UART_Init();
 	Time_Init();
-	// Timer_Init();
-	clock.hour = 13;
 	ADC_Init();
 	
 	while (1)
@@ -227,8 +240,12 @@ int main(void)
 		
 		
 		if (RxEndFlag) {
-			UARTStringPut(RxBuf);
+			StringToMode();
+			ModeToFunc();		// 增加了判断是否成功的返回值
+			if (!rmode) UARTStringPut(WrongMsg);
+			else UARTStringPut(TxBuf);
 			RxEndFlag = 0;
+			rmode = 0;
 		}
 		
 		switch (mode) {
@@ -316,7 +333,9 @@ void Time_Init(void)
 {
 	date.year = 2020;
 	date.month = 6;
-	date.day = 22;
+	date.day = 26;
+	clock.hour = 14;
+	clock.min = 40;
 }
 
 
@@ -520,12 +539,161 @@ void StringToMode(void)
 				rmode = 6;
 				return;
 			}
-			if (RxBuf[3] == ' ' && RxBuf[4] == 'P') {
+			if (RxBuf[3] == ' ' && RxBuf[4] == 'P') {	// 'SET PWM'
 				rmode = 10;
 				return;
 			}
 		}
 	}
+}
+
+void ModeToFunc(void)
+{
+	switch (rmode) {
+		case 1: GetDate(); break;
+		case 2: GetTime(); break;
+		case 3: UART_Date_Set(); break;
+		case 4: UART_Time_Set(); break;
+		case 5: UART_Clock1_Set(); break;
+		case 6: UART_Clock2_Set(); break;
+		case 7: GetVolt(); break;
+		case 8: GetTemp(); break;
+		case 9: Get_T_V(); break;
+		case 10: PWM_Set(); break;
+		default: break;
+	}
+}
+
+void GetDate(void)		// 将日期结构转化为字符串
+{
+	int x, tmp, i;
+	x = date.year;
+	i = 3;
+	while (x != 0) {
+		tmp = x % 10;
+		TxBuf[i] = 48+tmp;
+		x /= 10;
+		i--;
+	}
+	TxBuf[4] = '/';
+	x = date.month;
+	TxBuf[5] = x / 10 + 48;
+	TxBuf[6] = x % 10 + 48;
+	TxBuf[7] = '/';
+	x = date.day;
+	TxBuf[8] = x / 10 + 48;
+	TxBuf[9] = x % 10 + 48;
+	TxBuf[10] = '\0';
+}
+
+void GetTime(void)		// 将时间结构转化为字符串
+{
+	int x;
+	x = clock.hour;
+	TxBuf[0] = x / 10 + 48;
+	TxBuf[1] = x % 10 + 48;
+	TxBuf[2] = ':';
+	x = clock.min;
+	TxBuf[3] = x / 10 + 48;
+	TxBuf[4] = x % 10 + 48;
+	TxBuf[5] = ':';
+	x = clock.sec;
+	TxBuf[6] = x / 10 + 48;
+	TxBuf[7] = x % 10 + 48;
+	TxBuf[8] = '\0';
+}
+
+void UART_Date_Set(void)
+{
+	int pmonth, pday;
+	pmonth = (RxBuf[5] - 48)*10 + RxBuf[6] - 48;
+	pday = (RxBuf[7] - 48)*10 + RxBuf[8] - 48;
+	if (pmonth < 13 && pday <= monthD[pmonth]) {
+		TxBuf[0] = 'T'; TxBuf[1] = 'r'; TxBuf[2] = 'u'; TxBuf[3] = 'e'; TxBuf[4] = '\0';
+		date.month = pmonth;
+		date.day = pday;
+	}
+	else {
+		TxBuf[0] = 'F'; TxBuf[1] = 'a'; TxBuf[2] = 'l'; TxBuf[3] = 's'; TxBuf[4] = 'e';
+		TxBuf[5] = '\0';
+	}
+}
+
+void UART_Time_Set(void)
+{
+	int phour, pmin;
+	phour = (RxBuf[5] - 48)*10 + RxBuf[6] - 48;
+	pmin = (RxBuf[7] - 48)*10 + RxBuf[8] - 48;
+	if (phour < 25 && pmin < 61) {
+		TxBuf[0] = 'T'; TxBuf[1] = 'r'; TxBuf[2] = 'u'; TxBuf[3] = 'e'; TxBuf[4] = '\0';
+		clock.hour = phour;
+		clock.min = pmin;		
+	}
+	else {
+		TxBuf[0] = 'F'; TxBuf[1] = 'a'; TxBuf[2] = 'l'; TxBuf[3] = 's'; TxBuf[4] = 'e';
+		TxBuf[5] = '\0';
+	}
+}
+
+void UART_Clock1_Set(void)
+{
+	int phour, pmin;
+	phour = (RxBuf[9] - 48)*10 + RxBuf[10] - 48;
+	pmin = (RxBuf[11] - 48)*10 + RxBuf[12] - 48;
+	if (phour < 25 && pmin < 61) {
+		TxBuf[0] = 'T'; TxBuf[1] = 'r'; TxBuf[2] = 'u'; TxBuf[3] = 'e'; TxBuf[4] = '\0';
+		clock1.hour = phour;
+		clock1.min = pmin;
+		isClock1 = 1;
+	}
+	else {
+		TxBuf[0] = 'F'; TxBuf[1] = 'a'; TxBuf[2] = 'l'; TxBuf[3] = 's'; TxBuf[4] = 'e';
+		TxBuf[5] = '\0';
+	}
+}
+
+void UART_Clock2_Set(void)
+{
+	int phour, pmin;
+	phour = (RxBuf[9] - 48)*10 + RxBuf[10] - 48;
+	pmin = (RxBuf[11] - 48)*10 + RxBuf[12] - 48;
+	if (phour < 25 && pmin < 61) {
+		TxBuf[0] = 'T'; TxBuf[1] = 'r'; TxBuf[2] = 'u'; TxBuf[3] = 'e'; TxBuf[4] = '\0';
+		clock2.hour = phour;
+		clock2.min = pmin;
+		isClock2 = 1;
+	}
+	else {
+		TxBuf[0] = 'F'; TxBuf[1] = 'a'; TxBuf[2] = 'l'; TxBuf[3] = 's'; TxBuf[4] = 'e';
+		TxBuf[5] = '\0';
+	}
+}
+
+void GetVolt(void)
+{
+	ADCProcessorTrigger(ADC0_BASE, 3);
+	while(!ADCIntStatus(ADC0_BASE, 3, false))
+	{
+	}
+	ADCIntClear(ADC0_BASE, 3);
+	
+	ADCSequenceDataGet(ADC0_BASE, 3, pui32ADC0Volt);
+	t = pui32ADC0Volt[0] / 4.096 * 3.3;		// 计算四位电压数值
+	ui32VoltValue = (uint32_t)t;
+}
+
+void GetTemp(void)
+{
+	
+}
+void Get_T_V(void)
+{
+	
+}
+
+void PWM_Set(void)
+{
+	
 }
 
 void Display_Time()		// mode = 0
@@ -1086,8 +1254,8 @@ uint8_t reverse_bit(uint8_t value)
     int i = 0;
     for(i=7;i>=0;i--)
     {
-		num |= (( value % 2 ) << i );
-		value >>= 1;
+			num |= (( value % 2 ) << i );
+			value >>= 1;
     }
     return num;
 }
